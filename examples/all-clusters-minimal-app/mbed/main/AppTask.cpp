@@ -26,7 +26,8 @@
 #include <credentials/DeviceAttestationCredsProvider.h>
 #include <credentials/examples/DeviceAttestationCredsExample.h>
 
-#include <support/logging/CHIPLogging.h>
+#include <lib/support/logging/CHIPLogging.h>
+#include <static-supported-modes-manager.h>
 
 static LEDWidget sStatusLED(MBED_CONF_APP_SYSTEM_STATE_LED);
 
@@ -43,6 +44,7 @@ using namespace ::chip::DeviceLayer;
 using namespace ::chip::Credentials;
 
 AppTask AppTask::sAppTask;
+app::Clusters::ModeSelect::StaticSupportedModesManager sStaticSupportedModesManager;
 
 int AppTask::Init()
 {
@@ -85,6 +87,7 @@ int AppTask::Init()
         return EXIT_FAILURE;
     }
 
+    app::Clusters::ModeSelect::setSupportedModesManager(&sStaticSupportedModesManager);
     return 0;
 }
 

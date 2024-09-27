@@ -16,11 +16,11 @@
  */
 #pragma once
 
-#include <jni.h>
-
 #include "crypto/CHIPCryptoPAL.h"
 #include "lib/core/CHIPError.h"
+#include "lib/support/JniReferences.h"
 #include "lib/support/logging/CHIPLogging.h"
+#include <jni.h>
 
 /**
  * Bridging implementation of P256Keypair to allow delegation of signing and
@@ -42,9 +42,9 @@ public:
      */
     CHIP_ERROR SetDelegate(jobject delegate);
 
-    bool HasKeypair() const { return mDelegate != nullptr; }
+    bool HasKeypair() const { return mDelegate.HasValidObjectRef(); }
 
-    CHIP_ERROR Initialize() override;
+    CHIP_ERROR Initialize(chip::Crypto::ECPKeyTarget key_target) override;
 
     CHIP_ERROR Serialize(chip::Crypto::P256SerializedKeypair & output) const override;
 
@@ -61,8 +61,8 @@ public:
     const chip::Crypto::P256PublicKey & Pubkey() const override { return mPublicKey; };
 
 private:
-    jobject mDelegate;
-    jclass mKeypairDelegateClass;
+    chip::JniGlobalReference mDelegate;
+    chip::JniGlobalReference mKeypairDelegateClass;
     jmethodID mGetPublicKeyMethod;
     jmethodID mCreateCertificateSigningRequestMethod;
     jmethodID mEcdsaSignMessageMethod;

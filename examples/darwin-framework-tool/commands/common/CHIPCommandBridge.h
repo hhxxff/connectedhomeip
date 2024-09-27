@@ -17,29 +17,38 @@
  */
 
 #pragma once
+
 #import <Matter/Matter.h>
 #include <commands/common/Command.h>
 #include <commands/common/CredentialIssuerCommands.h>
 #include <map>
+#include <set>
 #include <string>
 
 #include "../provider/OTAProviderDelegate.h"
 
-#pragma once
-
-constexpr const char kIdentityAlpha[] = "alpha";
-constexpr const char kIdentityBeta[] = "beta";
-constexpr const char kIdentityGamma[] = "gamma";
+inline constexpr char kIdentityAlpha[] = "alpha";
+inline constexpr char kIdentityBeta[] = "beta";
+inline constexpr char kIdentityGamma[] = "gamma";
 
 class CHIPCommandBridge : public Command {
 public:
-    CHIPCommandBridge(const char * commandName)
-        : Command(commandName)
+    CHIPCommandBridge(const char * commandName, const char * helpText = nullptr)
+        : Command(commandName, helpText)
     {
         AddArgument("commissioner-name", &mCommissionerName);
+        AddArgument("commissioner-nodeId", 0, UINT64_MAX, &mCommissionerNodeId,
+            "Sets the commissioner node ID of the given "
+            "commissioner-name. Interactive mode will only set a single commissioner on the inital command. "
+            "The commissioner node ID will be persisted until a different one is specified.");
         AddArgument("paa-trust-store-path", &mPaaTrustStorePath,
             "Path to directory holding PAA certificate information.  Can be absolute or relative to the current working "
             "directory.");
+        AddArgument(
+            "storage-directory", &mStorageDirectory, "This option does nothing. It is here for API compatibility with chip-tool.");
+        AddArgument("commissioner-vendor-id", 0, UINT16_MAX, &mCommissionerVendorId,
+            "The vendor id to use for darwin-framework-tool. If not provided, chip::VendorId::TestVendor1 (65521, 0xFFF1) will be "
+            "used.");
     }
 
     /////////// Command Interface /////////
@@ -80,6 +89,10 @@ protected:
     MTRDeviceController * CurrentCommissioner();
 
     MTRDeviceController * GetCommissioner(const char * identity);
+
+    // Returns the MTRBaseDevice for the specified node ID.
+    // Will utilize an existing PASE connection if the device is being commissioned.
+    MTRBaseDevice * BaseDeviceWithNodeId(chip::NodeId nodeId);
 
     // Will log the given string and given error (as progress if success, error
     // if failure).
@@ -130,7 +143,9 @@ private:
     std::condition_variable cvWaitingForResponse;
     std::mutex cvWaitingForResponseMutex;
     chip::Optional<char *> mCommissionerName;
+    chip::Optional<uint64_t> mCommissionerNodeId;
     bool mWaitingForResponse { true };
     static dispatch_queue_t mOTAProviderCallbackQueue;
     chip::Optional<char *> mPaaTrustStorePath;
+    chip::Optional<chip::VendorId> mCommissionerVendorId;
 };

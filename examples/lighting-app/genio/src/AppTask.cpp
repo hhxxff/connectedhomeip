@@ -25,10 +25,7 @@
 
 #include "qrcodegen.h"
 
-#include <app-common/zap-generated/attribute-id.h>
-#include <app-common/zap-generated/attribute-type.h>
 #include <app-common/zap-generated/attributes/Accessors.h>
-#include <app-common/zap-generated/cluster-id.h>
 #include <app/clusters/identify-server/identify-server.h>
 #include <app/clusters/network-commissioning/network-commissioning.h>
 #include <app/clusters/on-off-server/on-off-server.h>
@@ -68,8 +65,6 @@
 #else
 #error "Must have portYIELD_FROM_ISR or portEND_SWITCHING_ISR"
 #endif
-
-#define UNUSED_PARAMETER(a) (a = a)
 
 #if defined(ENABLE_CHIP_SHELL)
 using chip::Shell::Engine;

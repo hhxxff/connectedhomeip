@@ -18,11 +18,18 @@ from collections import namedtuple
 from enum import Enum
 from xml.etree import ElementTree as ET
 
+from .builder import BuilderOutput
 from .gn import GnBuilder
 
+Board = namedtuple('Board', ['target_cpu'])
 App = namedtuple('App', ['name', 'source', 'outputs'])
 Tool = namedtuple('Tool', ['name', 'source', 'outputs'])
-Board = namedtuple('Board', ['target_cpu'])
+TestDriver = namedtuple('TestDriver', ['name', 'source'])
+
+
+class TizenBoard(Enum):
+
+    ARM = Board('arm')
 
 
 class TizenApp(Enum):
@@ -49,10 +56,18 @@ class TizenApp(Enum):
         ('chip-tool',
          'chip-tool.map'))
 
+    TESTS = TestDriver(
+        'tests',
+        'src/test_driver/tizen')
+
     @property
     def is_tpk(self):
         """If True, this app is a TPK."""
         return isinstance(self.value, App)
+
+    @property
+    def package(self):
+        return f'{self.package_name}-{self.package_version}.tpk'
 
     @property
     def package_name(self):
@@ -66,11 +81,6 @@ class TizenApp(Enum):
         self.manifest = ET.parse(manifest).getroot()
 
 
-class TizenBoard(Enum):
-
-    ARM = Board('arm')
-
-
 class TizenBuilder(GnBuilder):
 
     def __init__(self,
@@ -79,9 +89,12 @@ class TizenBuilder(GnBuilder):
                  app: TizenApp = TizenApp.LIGHT,
                  board: TizenBoard = TizenBoard.ARM,
                  enable_ble: bool = True,
+                 enable_thread: bool = True,
                  enable_wifi: bool = True,
                  use_asan: bool = False,
                  use_tsan: bool = False,
+                 use_ubsan: bool = False,
+                 with_ui: bool = False,
                  ):
         super(TizenBuilder, self).__init__(
             root=os.path.join(root, app.value.source),
@@ -102,14 +115,28 @@ class TizenBuilder(GnBuilder):
             except FileNotFoundError:
                 pass
 
+        if app == TizenApp.TESTS:
+            self.extra_gn_options.append('chip_build_tests=true')
+            # Tizen test driver creates ISO image with all unit test files. So,
+            # it uses twice as much space as regular build. Due to CI storage
+            # limitations, we need to strip debug symbols from executables.
+            self.extra_gn_options.append('strip_symbols=true')
+            self.build_command = 'check'
+
         if not enable_ble:
             self.extra_gn_options.append('chip_config_network_layer_ble=false')
+        if not enable_thread:
+            self.extra_gn_options.append('chip_enable_openthread=false')
         if not enable_wifi:
             self.extra_gn_options.append('chip_enable_wifi=false')
         if use_asan:
             self.extra_gn_options.append('is_asan=true')
         if use_tsan:
             raise Exception("TSAN sanitizer not supported by Tizen toolchain")
+        if use_ubsan:
+            self.extra_gn_options.append('is_ubsan=true')
+        if with_ui:
+            self.extra_gn_options.append('chip_examples_enable_ui=true')
 
     def GnBuildArgs(self):
         # Make sure that required ENV variables are defined
@@ -125,22 +152,23 @@ class TizenBuilder(GnBuilder):
             'tizen_sdk_sysroot="%s"' % os.environ['TIZEN_SDK_SYSROOT'],
         ]
 
-    def _generate_flashbundle(self):
+    def _bundle(self):
         if self.app.is_tpk:
             logging.info('Packaging %s', self.output_dir)
             cmd = ['ninja', '-C', self.output_dir, self.app.value.name + ':tpk']
             self._Execute(cmd, title='Packaging ' + self.identifier)
 
     def build_outputs(self):
-        return {
-            output: os.path.join(self.output_dir, output)
-            for output in self.app.value.outputs
-        }
+        for name in self.app.value.outputs:
+            if not self.options.enable_link_map_file and name.endswith(".map"):
+                continue
+            yield BuilderOutput(
+                os.path.join(self.output_dir, name),
+                name)
 
-    def flashbundle(self):
+    def bundle_outputs(self):
         if not self.app.is_tpk:
-            return {}
-        tpk = f'{self.app.package_name}-{self.app.package_version}.tpk'
-        return {
-            tpk: os.path.join(self.output_dir, 'package', 'out', tpk),
-        }
+            return
+        source = os.path.join(self.output_dir, self.app.package_name,
+                              'out', self.app.package)
+        yield BuilderOutput(source, self.app.package)

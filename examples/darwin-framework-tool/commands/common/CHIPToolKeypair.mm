@@ -12,15 +12,14 @@ static NSString * const kCHIPToolKeychainLabel = @"Chip Tool Keypair";
 static NSString * const kOperationalCredentialsIssuerKeypairStorage = @"ChipToolOpCredsCAKey";
 static NSString * const kOperationalCredentialsIPK = @"ChipToolOpCredsIPK";
 
-@interface CHIPToolKeypair ()
-@property (nonatomic) chip::Crypto::P256Keypair mKeyPair;
-@property (nonatomic) chip::Crypto::P256Keypair mIssuer;
-@property (nonatomic) NSData * ipk;
-@property (atomic) uint32_t mNow;
-@property (nonatomic, readonly) SecKeyRef mPublicKey;
-@end
+@implementation CHIPToolKeypair {
+    chip::Crypto::P256Keypair _mKeyPair;
+    chip::Crypto::P256Keypair _mIssuer;
+    NSData * _ipk;
+    uint32_t _mNow;
+    SecKeyRef _mPublicKey;
+}
 
-@implementation CHIPToolKeypair
 - (instancetype)init
 {
     if (self = [super init]) {
@@ -31,7 +30,7 @@ static NSString * const kOperationalCredentialsIPK = @"ChipToolOpCredsIPK";
 
 - (BOOL)initialize
 {
-    return _mKeyPair.Initialize() == CHIP_NO_ERROR;
+    return _mKeyPair.Initialize(chip::Crypto::ECPKeyTarget::ECDSA) == CHIP_NO_ERROR;
 }
 
 - (NSData *)signMessageECDSA_RAW:(NSData *)message

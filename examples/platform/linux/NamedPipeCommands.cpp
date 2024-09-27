@@ -18,12 +18,15 @@
 
 #include "NamedPipeCommands.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <lib/support/CodeUtils.h>
 #include <pthread.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+#include <string>
 
 static constexpr const size_t kChipEventCmdBufSize = 256;
 

@@ -23,11 +23,7 @@
 #include "LEDWidget.h"
 
 #include "qrcodegen.h"
-#include <app-common/zap-generated/af-structs.h>
-#include <app-common/zap-generated/attribute-id.h>
-#include <app-common/zap-generated/attribute-type.h>
 #include <app-common/zap-generated/attributes/Accessors.h>
-#include <app-common/zap-generated/cluster-id.h>
 #include <app-common/zap-generated/cluster-objects.h>
 #include <app/clusters/door-lock-server/door-lock-server.h>
 #include <app/clusters/identify-server/identify-server.h>
@@ -54,7 +50,7 @@
 #define APP_TASK_STACK_SIZE (4096)
 #define APP_TASK_PRIORITY 2
 #define APP_EVENT_QUEUE_SIZE 10
-//#define EXAMPLE_VENDOR_ID                   0xcafe
+// #define EXAMPLE_VENDOR_ID                   0xcafe
 
 #ifdef portYIELD_FROM_ISR
 #define OS_YIELD_FROM_ISR(yield) portYIELD_FROM_ISR(yield)
@@ -63,8 +59,6 @@
 #else
 #error "Must have portYIELD_FROM_ISR or portEND_SWITCHING_ISR"
 #endif
-
-#define UNUSED_PARAMETER(a) (a = a)
 
 namespace {
 
@@ -97,8 +91,8 @@ chip::app::Clusters::NetworkCommissioning::Instance sWiFiNetworkCommissioningIns
 } // namespace
 
 using chip::app::Clusters::DoorLock::DlLockState;
-using chip::app::Clusters::DoorLock::DlOperationError;
-using chip::app::Clusters::DoorLock::DlOperationSource;
+using chip::app::Clusters::DoorLock::OperationErrorEnum;
+using chip::app::Clusters::DoorLock::OperationSourceEnum;
 
 using namespace chip;
 using namespace ::chip::DeviceLayer;
@@ -597,14 +591,15 @@ void AppTask::UpdateClusterState(intptr_t context)
     bool unlocked        = LockMgr().NextState();
     DlLockState newState = unlocked ? DlLockState::kUnlocked : DlLockState::kLocked;
 
-    DlOperationSource source = DlOperationSource::kUnspecified;
+    OperationSourceEnum source = OperationSourceEnum::kUnspecified;
 
     // write the new lock value
-    EmberAfStatus status =
-        DoorLockServer::Instance().SetLockState(1, newState, source) ? EMBER_ZCL_STATUS_SUCCESS : EMBER_ZCL_STATUS_FAILURE;
+    Protocols::InteractionModel::Status status = DoorLockServer::Instance().SetLockState(1, newState, source)
+        ? Protocols::InteractionModel::Status::Success
+        : Protocols::InteractionModel::Status::Failure;
 
-    if (status != EMBER_ZCL_STATUS_SUCCESS)
+    if (status != Protocols::InteractionModel::Status::Success)
     {
-        MT793X_LOG("ERR: updating lock state %x", status);
+        MT793X_LOG("ERR: updating lock state %x", to_underlying(status));
     }
 }

@@ -27,9 +27,6 @@ clang-apply-replacements out/fixes.yaml
 
 """
 
-import build
-import click
-import coloredlogs
 import glob
 import json
 import logging
@@ -43,6 +40,9 @@ import sys
 import tempfile
 import threading
 import traceback
+
+import click
+import coloredlogs
 import yaml
 
 
@@ -84,6 +84,15 @@ class ClangTidyEntry:
 
         command_items = shlex.split(command)
         compiler = os.path.basename(command_items[0])
+
+        # Clang-tidy complains about "unused argument '-c'"
+        # We could disable that with something like
+        #
+        #    self.clang_arguments.append("-Wno-unused-command-line-argument")
+        #
+        # However that seems to potentially disable a lot, so for now just filter out the
+        # offending argument
+        command_items = [arg for arg in command_items if arg not in {'-c', '-S'}]
 
         # Allow gcc/g++ invocations to also be tidied - arguments should be
         # compatible and on darwin gcc/g++ is actually a symlink to clang
@@ -147,16 +156,16 @@ class ClangTidyEntry:
                     "Use -system-headers to display errors from system headers as well.",
                 ]
 
-                for l in err.decode('utf-8').split('\n'):
-                    l = l.strip()
+                for line in err.decode('utf-8').split('\n'):
+                    line = line.strip()
 
-                    if any(map(lambda s: s in l, skip_strings)):
+                    if any(map(lambda s: s in line, skip_strings)):
                         continue
 
-                    if not l:
+                    if not line:
                         continue  # no empty lines
 
-                    logging.warning('TIDY %s: %s', self.file, l)
+                    logging.warning('TIDY %s: %s', self.file, line)
 
             if proc.returncode != 0:
                 if proc.returncode < 0:
@@ -168,7 +177,7 @@ class ClangTidyEntry:
                         "Tidy %s ended with code %d", self.file, proc.returncode
                     )
                 return TidyResult(self.full_path, False)
-        except:
+        except Exception:
             traceback.print_exc()
             return TidyResult(self.full_path, False)
 
@@ -198,7 +207,7 @@ def find_darwin_gcc_sysroot():
         if not line.startswith('Path: '):
             continue
         path = line[line.find(': ')+2:]
-        if not '/MacOSX.platform/' in path:
+        if '/MacOSX.platform/' not in path:
             continue
         logging.info("Found %s" % path)
         return path
@@ -483,4 +492,4 @@ def cmd_fix(context):
 
 
 if __name__ == "__main__":
-    main()
+    main(auto_envvar_prefix='CHIP')

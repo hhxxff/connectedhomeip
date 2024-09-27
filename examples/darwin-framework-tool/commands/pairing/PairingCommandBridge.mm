@@ -28,31 +28,62 @@
 using namespace ::chip;
 using namespace ::chip::Controller;
 
+extern NSMutableArray * gDiscoveredDevices;
+
+// A no-op MTRDeviceAttestationDelegate which lets us test (by default, in CI)
+// commissioning flows that have such a delegate.
+@interface NoOpAttestationDelegate : NSObject <MTRDeviceAttestationDelegate>
+@end
+
+@implementation NoOpAttestationDelegate
+- (void)deviceAttestationCompletedForController:(MTRDeviceController *)controller
+                             opaqueDeviceHandle:(void *)opaqueDeviceHandle
+                          attestationDeviceInfo:(MTRDeviceAttestationDeviceInfo *)attestationDeviceInfo
+                                          error:(NSError * _Nullable)error
+{
+    [controller continueCommissioningDevice:opaqueDeviceHandle ignoreAttestationFailure:NO error:nil];
+}
+
+@end
+
 void PairingCommandBridge::SetUpDeviceControllerDelegate()
 {
-    dispatch_queue_t callbackQueue = dispatch_queue_create("com.chip.pairing", DISPATCH_QUEUE_SERIAL);
     CHIPToolDeviceControllerDelegate * deviceControllerDelegate = [[CHIPToolDeviceControllerDelegate alloc] init];
-    MTRCommissioningParameters * params = [[MTRCommissioningParameters alloc] init];
-    MTRDeviceController * commissioner = CurrentCommissioner();
-
+    [deviceControllerDelegate setCommandBridge:this];
     [deviceControllerDelegate setDeviceID:mNodeId];
-    switch (mNetworkType) {
-    case PairingNetworkType::None:
-    case PairingNetworkType::Ethernet:
-        break;
-    case PairingNetworkType::WiFi:
-        [params setWifiSSID:[NSData dataWithBytes:mSSID.data() length:mSSID.size()]];
-        [params setWifiCredentials:[NSData dataWithBytes:mPassword.data() length:mPassword.size()]];
-        break;
-    case PairingNetworkType::Thread:
-        [params setThreadOperationalDataset:[NSData dataWithBytes:mOperationalDataset.data() length:mOperationalDataset.size()]];
-        break;
+
+    if (mCommissioningType != CommissioningType::None) {
+        MTRCommissioningParameters * params = [[MTRCommissioningParameters alloc] init];
+        switch (mCommissioningType) {
+        case CommissioningType::None:
+        case CommissioningType::WithoutNetwork:
+            break;
+        case CommissioningType::WithWiFi:
+            [params setWifiSSID:[NSData dataWithBytes:mSSID.data() length:mSSID.size()]];
+            [params setWifiCredentials:[NSData dataWithBytes:mPassword.data() length:mPassword.size()]];
+            break;
+        case CommissioningType::WithThread:
+            [params setThreadOperationalDataset:[NSData dataWithBytes:mOperationalDataset.data() length:mOperationalDataset.size()]];
+            break;
+        }
+
+        if (mUseDeviceAttestationDelegate.ValueOr(false)) {
+            params.deviceAttestationDelegate = [[NoOpAttestationDelegate alloc] init];
+            if (mDeviceAttestationFailsafeTime.HasValue()) {
+                params.failSafeTimeout = @(mDeviceAttestationFailsafeTime.Value());
+            }
+        }
+
+        if (mCountryCode.HasValue()) {
+            params.countryCode = [NSString stringWithUTF8String:mCountryCode.Value()];
+        }
+
+        [deviceControllerDelegate setParams:params];
     }
 
-    [deviceControllerDelegate setCommandBridge:this];
-    [deviceControllerDelegate setParams:params];
+    MTRDeviceController * commissioner = CurrentCommissioner();
     [deviceControllerDelegate setCommissioner:commissioner];
-
+    dispatch_queue_t callbackQueue = dispatch_queue_create("com.chip.pairing", DISPATCH_QUEUE_SERIAL);
     [commissioner setDeviceControllerDelegate:deviceControllerDelegate queue:callbackQueue];
 }
 
@@ -60,7 +91,7 @@ CHIP_ERROR PairingCommandBridge::RunCommand()
 {
     NSError * error;
     switch (mPairingMode) {
-    case PairingMode::None:
+    case PairingMode::Unpair:
         Unpair();
         break;
     case PairingMode::Code:
@@ -68,6 +99,9 @@ CHIP_ERROR PairingCommandBridge::RunCommand()
         break;
     case PairingMode::Ble:
         PairWithCode(&error);
+        break;
+    case PairingMode::AlreadyDiscoveredByIndex:
+        PairWithIndex(&error);
         break;
     }
 
@@ -85,6 +119,29 @@ void PairingCommandBridge::PairWithCode(NSError * __autoreleasing * error)
     [commissioner setupCommissioningSessionWithPayload:payload newNodeID:@(mNodeId) error:error];
 }
 
+void PairingCommandBridge::PairWithIndex(NSError * __autoreleasing * error)
+{
+    SetUpDeviceControllerDelegate();
+    MTRDeviceController * commissioner = CurrentCommissioner();
+
+    if (mIndex >= [gDiscoveredDevices count]) {
+        auto errorString = [NSString stringWithFormat:@"Error retrieving discovered device at index %@", @(mIndex)];
+        *error = [[NSError alloc] initWithDomain:@"PairingDomain"
+                                            code:MTRErrorCodeGeneralError
+                                        userInfo:@ { NSLocalizedDescriptionKey : NSLocalizedString(errorString, nil) }];
+        return;
+    }
+
+    NSString * onboardingPayload = [NSString stringWithUTF8String:mOnboardingPayload];
+    auto * payload = [MTRSetupPayload setupPayloadWithOnboardingPayload:onboardingPayload error:error];
+    if (payload == nil) {
+        return;
+    }
+
+    auto discoveredDevice = (MTRCommissionableBrowserResult *) gDiscoveredDevices[mIndex];
+    [commissioner setupCommissioningSessionWithDiscoveredDevice:discoveredDevice payload:payload newNodeID:@(mNodeId) error:error];
+}
+
 void PairingCommandBridge::PairWithPayload(NSError * __autoreleasing * error)
 {
     NSString * onboardingPayload = [NSString stringWithUTF8String:mOnboardingPayload];
@@ -100,8 +157,7 @@ void PairingCommandBridge::PairWithPayload(NSError * __autoreleasing * error)
 void PairingCommandBridge::Unpair()
 {
     dispatch_queue_t callbackQueue = dispatch_queue_create("com.chip-tool.command", DISPATCH_QUEUE_SERIAL);
-    MTRDeviceController * commissioner = CurrentCommissioner();
-    auto * device = [MTRBaseDevice deviceWithNodeID:@(mNodeId) controller:commissioner];
+    auto * device = BaseDeviceWithNodeId(mNodeId);
 
     ChipLogProgress(chipTool, "Attempting to unpair device %llu", mNodeId);
     MTRBaseClusterOperationalCredentials * opCredsCluster =

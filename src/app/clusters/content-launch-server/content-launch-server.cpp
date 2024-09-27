@@ -20,15 +20,17 @@
 
 #include <app-common/zap-generated/attributes/Accessors.h>
 #include <app/AttributeAccessInterface.h>
+#include <app/AttributeAccessInterfaceRegistry.h>
 #include <app/CommandHandler.h>
 #include <app/ConcreteCommandPath.h>
+#include <app/data-model/Encode.h>
+#include <app/util/attribute-storage.h>
+#include <app/util/config.h>
+#include <platform/CHIPDeviceConfig.h>
+
 #if CHIP_DEVICE_CONFIG_APP_PLATFORM_ENABLED
 #include <app/app-platform/ContentAppPlatform.h>
 #endif // CHIP_DEVICE_CONFIG_APP_PLATFORM_ENABLED
-#include <app/data-model/Encode.h>
-#include <app/util/af.h>
-#include <app/util/attribute-storage.h>
-#include <platform/CHIPDeviceConfig.h>
 
 #include <list>
 
@@ -39,9 +41,11 @@ using namespace chip::app::Clusters::ContentLauncher;
 #if CHIP_DEVICE_CONFIG_APP_PLATFORM_ENABLED
 using namespace chip::AppPlatform;
 #endif // CHIP_DEVICE_CONFIG_APP_PLATFORM_ENABLED
+using chip::Protocols::InteractionModel::Status;
 
 static constexpr size_t kContentLaunchDelegateTableSize =
-    EMBER_AF_CONTENT_LAUNCHER_CLUSTER_SERVER_ENDPOINT_COUNT + CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT;
+    MATTER_DM_CONTENT_LAUNCHER_CLUSTER_SERVER_ENDPOINT_COUNT + CHIP_DEVICE_CONFIG_DYNAMIC_ENDPOINT_COUNT;
+static_assert(kContentLaunchDelegateTableSize < kEmberInvalidEndpointIndex, "ContentLaunch Delegate table size error");
 
 // -----------------------------------------------------------------------------
 // Delegate Implementation
@@ -64,8 +68,9 @@ Delegate * GetDelegate(EndpointId endpoint)
 #endif // CHIP_DEVICE_CONFIG_APP_PLATFORM_ENABLED
     ChipLogProgress(Zcl, "Content Launcher NOT returning ContentApp delegate for endpoint:%u", endpoint);
 
-    uint16_t ep = emberAfFindClusterServerEndpointIndex(endpoint, ContentLauncher::Id);
-    return ((ep == 0xFFFF || ep >= EMBER_AF_CONTENT_LAUNCHER_CLUSTER_SERVER_ENDPOINT_COUNT) ? nullptr : gDelegateTable[ep]);
+    uint16_t ep = emberAfGetClusterServerEndpointIndex(endpoint, ContentLauncher::Id,
+                                                       MATTER_DM_CONTENT_LAUNCHER_CLUSTER_SERVER_ENDPOINT_COUNT);
+    return (ep >= kContentLaunchDelegateTableSize ? nullptr : gDelegateTable[ep]);
 }
 
 bool isDelegateNull(Delegate * delegate, EndpointId endpoint)
@@ -86,9 +91,10 @@ namespace ContentLauncher {
 
 void SetDefaultDelegate(EndpointId endpoint, Delegate * delegate)
 {
-    uint16_t ep = emberAfFindClusterServerEndpointIndex(endpoint, ContentLauncher::Id);
-    // if endpoint is found and is not a dynamic endpoint
-    if (ep != 0xFFFF && ep < EMBER_AF_CONTENT_LAUNCHER_CLUSTER_SERVER_ENDPOINT_COUNT)
+    uint16_t ep = emberAfGetClusterServerEndpointIndex(endpoint, ContentLauncher::Id,
+                                                       MATTER_DM_CONTENT_LAUNCHER_CLUSTER_SERVER_ENDPOINT_COUNT);
+    // if endpoint is found
+    if (ep < kContentLaunchDelegateTableSize)
     {
         gDelegateTable[ep] = delegate;
     }
@@ -97,7 +103,7 @@ void SetDefaultDelegate(EndpointId endpoint, Delegate * delegate)
     }
 }
 
-bool Delegate::HasFeature(chip::EndpointId endpoint, ContentLauncherFeature feature)
+bool Delegate::HasFeature(chip::EndpointId endpoint, Feature feature)
 {
     uint32_t featureMap = GetFeatureMap(endpoint);
     return (featureMap & chip::to_underlying(feature));
@@ -124,6 +130,7 @@ private:
     CHIP_ERROR ReadAcceptHeaderAttribute(app::AttributeValueEncoder & aEncoder, Delegate * delegate);
     CHIP_ERROR ReadSupportedStreamingProtocolsAttribute(app::AttributeValueEncoder & aEncoder, Delegate * delegate);
     CHIP_ERROR ReadFeatureFlagAttribute(EndpointId endpoint, app::AttributeValueEncoder & aEncoder, Delegate * delegate);
+    CHIP_ERROR ReadRevisionAttribute(EndpointId endpoint, app::AttributeValueEncoder & aEncoder, Delegate * delegate);
 };
 
 ContentLauncherAttrAccess gContentLauncherAttrAccess;
@@ -159,9 +166,11 @@ CHIP_ERROR ContentLauncherAttrAccess::Read(const app::ConcreteReadAttributePath 
 
         return ReadFeatureFlagAttribute(endpoint, aEncoder, delegate);
     }
-    default: {
-        break;
+    case app::Clusters::ContentLauncher::Attributes::ClusterRevision::Id: {
+        return ReadRevisionAttribute(endpoint, aEncoder, delegate);
     }
+    default:
+        break;
     }
 
     return CHIP_NO_ERROR;
@@ -186,6 +195,13 @@ CHIP_ERROR ContentLauncherAttrAccess::ReadSupportedStreamingProtocolsAttribute(a
     return aEncoder.Encode(streamingProtocols);
 }
 
+CHIP_ERROR ContentLauncherAttrAccess::ReadRevisionAttribute(EndpointId endpoint, app::AttributeValueEncoder & aEncoder,
+                                                            Delegate * delegate)
+{
+    uint16_t clusterRevision = delegate->GetClusterRevision(endpoint);
+    return aEncoder.Encode(clusterRevision);
+}
+
 } // anonymous namespace
 
 // -----------------------------------------------------------------------------
@@ -200,16 +216,19 @@ bool emberAfContentLauncherClusterLaunchContentCallback(CommandHandler * command
     auto & autoplay               = commandData.autoPlay;
     auto & data                   = commandData.data;
     auto & decodableParameterList = commandData.search.parameterList;
+    auto & playbackPreferences    = commandData.playbackPreferences;
+    auto & useCurrentContext      = commandData.useCurrentContext;
 
-    app::CommandResponseHelper<Commands::LaunchResponse::Type> responder(commandObj, commandPath);
+    app::CommandResponseHelper<Commands::LauncherResponse::Type> responder(commandObj, commandPath);
 
     Delegate * delegate = GetDelegate(endpoint);
 
-    VerifyOrExit(isDelegateNull(delegate, endpoint) != true &&
-                     delegate->HasFeature(endpoint, ContentLauncherFeature::kContentSearch),
+    VerifyOrExit(isDelegateNull(delegate, endpoint) != true && delegate->HasFeature(endpoint, Feature::kContentSearch),
                  err = CHIP_ERROR_INCORRECT_STATE);
 
-    delegate->HandleLaunchContent(responder, decodableParameterList, autoplay, data.HasValue() ? data.Value() : CharSpan());
+    // note assume if client does not send useCurrentContext then it's set to false
+    delegate->HandleLaunchContent(responder, decodableParameterList, autoplay, data.HasValue() ? data.Value() : CharSpan(),
+                                  playbackPreferences, useCurrentContext.HasValue() ? useCurrentContext.Value() : false);
 
 exit:
     if (err != CHIP_NO_ERROR)
@@ -220,7 +239,7 @@ exit:
     // If isDelegateNull, no one will call responder, so HasSentResponse will be false
     if (!responder.HasSentResponse())
     {
-        emberAfSendImmediateDefaultResponse(EMBER_ZCL_STATUS_FAILURE);
+        commandObj->AddStatus(commandPath, Status::Failure);
     }
 
     return true;
@@ -236,10 +255,10 @@ bool emberAfContentLauncherClusterLaunchURLCallback(CommandHandler * commandObj,
     auto & displayString       = commandData.displayString;
     auto & brandingInformation = commandData.brandingInformation;
 
-    app::CommandResponseHelper<Commands::LaunchResponse::Type> responder(commandObj, commandPath);
+    app::CommandResponseHelper<Commands::LauncherResponse::Type> responder(commandObj, commandPath);
 
     Delegate * delegate = GetDelegate(endpoint);
-    VerifyOrExit(isDelegateNull(delegate, endpoint) != true && delegate->HasFeature(endpoint, ContentLauncherFeature::kURLPlayback),
+    VerifyOrExit(isDelegateNull(delegate, endpoint) != true && delegate->HasFeature(endpoint, Feature::kURLPlayback),
                  err = CHIP_ERROR_INCORRECT_STATE);
     {
         delegate->HandleLaunchUrl(responder, contentUrl, displayString.HasValue() ? displayString.Value() : CharSpan(),
@@ -256,7 +275,7 @@ exit:
     // If isDelegateNull, no one will call responder, so HasSentResponse will be false
     if (!responder.HasSentResponse())
     {
-        emberAfSendImmediateDefaultResponse(EMBER_ZCL_STATUS_FAILURE);
+        commandObj->AddStatus(commandPath, Status::Failure);
     }
 
     return true;
@@ -265,7 +284,7 @@ exit:
 // -----------------------------------------------------------------------------
 // Plugin initialization
 
-void MatterContentLauncherPluginServerInitCallback(void)
+void MatterContentLauncherPluginServerInitCallback()
 {
-    registerAttributeAccessOverride(&gContentLauncherAttrAccess);
+    AttributeAccessInterfaceRegistry::Instance().Register(&gContentLauncherAttrAccess);
 }

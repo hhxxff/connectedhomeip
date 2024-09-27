@@ -19,12 +19,12 @@
 #include "CHIPDevicePlatformConfig.h"
 #include <crypto/CHIPCryptoPAL.h>
 
-#if CONFIG_CHIP_CERTIFICATION_DECLARATION_STORAGE
+#ifdef CONFIG_CHIP_CERTIFICATION_DECLARATION_STORAGE
 #include <credentials/CertificationDeclaration.h>
 #include <platform/Zephyr/ZephyrConfig.h>
 #endif
 
-#include <logging/log.h>
+#include <zephyr/logging/log.h>
 
 namespace chip {
 namespace {
@@ -81,7 +81,7 @@ CHIP_ERROR FactoryDataProvider<FlashFactoryData>::Init()
         return error;
     }
 
-    if (!ParseFactoryData(factoryData, factoryDataSize, &mFactoryData))
+    if (!ParseFactoryData(factoryData, static_cast<uint16_t>(factoryDataSize), &mFactoryData))
     {
         ChipLogError(DeviceLayer, "Failed to parse factory data");
         return CHIP_ERROR_PERSISTED_STORAGE_VALUE_NOT_FOUND;
@@ -101,7 +101,7 @@ CHIP_ERROR FactoryDataProvider<FlashFactoryData>::Init()
 template <class FlashFactoryData>
 CHIP_ERROR FactoryDataProvider<FlashFactoryData>::GetCertificationDeclaration(MutableByteSpan & outBuffer)
 {
-#if CONFIG_CHIP_CERTIFICATION_DECLARATION_STORAGE
+#ifdef CONFIG_CHIP_CERTIFICATION_DECLARATION_STORAGE
     size_t cdLen = 0;
 
     if (Internal::ZephyrConfig::ReadConfigValueBin(Internal::ZephyrConfig::kConfigKey_CertificationDeclaration,
@@ -157,20 +157,62 @@ CHIP_ERROR FactoryDataProvider<FlashFactoryData>::SignWithDeviceAttestationKey(c
 {
     Crypto::P256ECDSASignature signature;
     Crypto::P256Keypair keypair;
+    CHIP_ERROR err = CHIP_NO_ERROR;
+#ifdef CONFIG_CHIP_CRYPTO_PSA
+    psa_key_id_t keyId = 0;
+#endif
 
-    VerifyOrReturnError(outSignBuffer.size() >= signature.Capacity(), CHIP_ERROR_BUFFER_TOO_SMALL);
-    ReturnErrorCodeIf(!mFactoryData.dac_cert.data, CHIP_ERROR_PERSISTED_STORAGE_VALUE_NOT_FOUND);
-    ReturnErrorCodeIf(!mFactoryData.dac_priv_key.data, CHIP_ERROR_PERSISTED_STORAGE_VALUE_NOT_FOUND);
+    VerifyOrExit(outSignBuffer.size() >= signature.Capacity(), err = CHIP_ERROR_BUFFER_TOO_SMALL);
+    VerifyOrExit(mFactoryData.dac_cert.data, err = CHIP_ERROR_PERSISTED_STORAGE_VALUE_NOT_FOUND);
+    VerifyOrExit(mFactoryData.dac_priv_key.data, err = CHIP_ERROR_PERSISTED_STORAGE_VALUE_NOT_FOUND);
 
-    // Extract public key from DAC cert.
-    ByteSpan dacCertSpan{ reinterpret_cast<uint8_t *>(mFactoryData.dac_cert.data), mFactoryData.dac_cert.len };
-    chip::Crypto::P256PublicKey dacPublicKey;
+#ifdef CONFIG_CHIP_CRYPTO_PSA
+    {
+        psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+        psa_reset_key_attributes(&attributes);
+        psa_set_key_type(&attributes, PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_SECP_R1));
+        psa_set_key_bits(&attributes, kDACPrivateKeyLength * 8);
+        psa_set_key_algorithm(&attributes, PSA_ALG_ECDSA(PSA_ALG_SHA_256));
+        psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_SIGN_MESSAGE);
+        VerifyOrExit(psa_import_key(&attributes, reinterpret_cast<uint8_t *>(mFactoryData.dac_priv_key.data), kDACPrivateKeyLength,
+                                    &keyId) == PSA_SUCCESS,
+                     err = CHIP_ERROR_INTERNAL);
 
-    ReturnErrorOnFailure(chip::Crypto::ExtractPubkeyFromX509Cert(dacCertSpan, dacPublicKey));
-    ReturnErrorOnFailure(
-        LoadKeypairFromRaw(ByteSpan(reinterpret_cast<uint8_t *>(mFactoryData.dac_priv_key.data), mFactoryData.dac_priv_key.len),
-                           ByteSpan(dacPublicKey.Bytes(), dacPublicKey.Length()), keypair));
-    ReturnErrorOnFailure(keypair.ECDSA_sign_msg(messageToSign.data(), messageToSign.size(), signature));
+        size_t outputLen    = 0;
+        psa_status_t status = psa_sign_message(keyId, PSA_ALG_ECDSA(PSA_ALG_SHA_256), messageToSign.data(), messageToSign.size(),
+                                               signature.Bytes(), signature.Capacity(), &outputLen);
+        VerifyOrExit(!status, err = CHIP_ERROR_INTERNAL);
+        VerifyOrExit(outputLen == chip::Crypto::kP256_ECDSA_Signature_Length_Raw, err = CHIP_ERROR_INTERNAL);
+        err = signature.SetLength(outputLen);
+        VerifyOrExit(err == CHIP_NO_ERROR, );
+    }
+#else
+    {
+        // Extract public key from DAC cert.
+        ByteSpan dacCertSpan{ reinterpret_cast<uint8_t *>(mFactoryData.dac_cert.data), mFactoryData.dac_cert.len };
+        chip::Crypto::P256PublicKey dacPublicKey;
+
+        err = chip::Crypto::ExtractPubkeyFromX509Cert(dacCertSpan, dacPublicKey);
+        VerifyOrExit(err == CHIP_NO_ERROR, );
+        err =
+            LoadKeypairFromRaw(ByteSpan(reinterpret_cast<uint8_t *>(mFactoryData.dac_priv_key.data), mFactoryData.dac_priv_key.len),
+                               ByteSpan(dacPublicKey.Bytes(), dacPublicKey.Length()), keypair);
+        VerifyOrExit(err == CHIP_NO_ERROR, );
+        err = keypair.ECDSA_sign_msg(messageToSign.data(), messageToSign.size(), signature);
+        VerifyOrExit(err == CHIP_NO_ERROR, );
+    }
+#endif
+
+exit:
+
+#ifdef CONFIG_CHIP_CRYPTO_PSA
+    psa_destroy_key(keyId);
+#endif
+
+    if (err != CHIP_NO_ERROR)
+    {
+        return err;
+    }
 
     return CopySpanToMutableSpan(ByteSpan{ signature.ConstBytes(), signature.Length() }, outSignBuffer);
 }
@@ -323,6 +365,8 @@ CHIP_ERROR FactoryDataProvider<FlashFactoryData>::GetRotatingDeviceIdUniqueId(Mu
 
     memcpy(uniqueIdSpan.data(), mFactoryData.rd_uid.data, mFactoryData.rd_uid.len);
 
+    uniqueIdSpan.reduce_size(mFactoryData.rd_uid.len);
+
     return CHIP_NO_ERROR;
 }
 
@@ -339,9 +383,59 @@ CHIP_ERROR FactoryDataProvider<FlashFactoryData>::GetEnableKey(MutableByteSpan &
     return CHIP_NO_ERROR;
 }
 
+template <class FlashFactoryData>
+CHIP_ERROR FactoryDataProvider<FlashFactoryData>::GetProductFinish(app::Clusters::BasicInformation::ProductFinishEnum * finish)
+{
+    ReturnErrorCodeIf(!finish, CHIP_ERROR_INVALID_ARGUMENT);
+    ReturnErrorCodeIf(!mFactoryData.productFinishPresent, CHIP_ERROR_NOT_IMPLEMENTED);
+    *finish = static_cast<app::Clusters::BasicInformation::ProductFinishEnum>(mFactoryData.product_finish);
+
+    return CHIP_NO_ERROR;
+}
+
+template <class FlashFactoryData>
+CHIP_ERROR FactoryDataProvider<FlashFactoryData>::GetProductPrimaryColor(app::Clusters::BasicInformation::ColorEnum * primaryColor)
+{
+    ReturnErrorCodeIf(!primaryColor, CHIP_ERROR_INVALID_ARGUMENT);
+    ReturnErrorCodeIf(!mFactoryData.primaryColorPresent, CHIP_ERROR_NOT_IMPLEMENTED);
+
+    *primaryColor = static_cast<app::Clusters::BasicInformation::ColorEnum>(mFactoryData.primary_color);
+
+    return CHIP_NO_ERROR;
+}
+
+template <class FlashFactoryData>
+CHIP_ERROR FactoryDataProvider<FlashFactoryData>::GetUserData(MutableByteSpan & userData)
+{
+    ReturnErrorCodeIf(!mFactoryData.user.data, CHIP_ERROR_PERSISTED_STORAGE_VALUE_NOT_FOUND);
+    ReturnErrorCodeIf(userData.size() < mFactoryData.user.len, CHIP_ERROR_BUFFER_TOO_SMALL);
+
+    memcpy(userData.data(), mFactoryData.user.data, mFactoryData.user.len);
+
+    userData.reduce_size(mFactoryData.user.len);
+
+    return CHIP_NO_ERROR;
+}
+
+template <class FlashFactoryData>
+CHIP_ERROR FactoryDataProvider<FlashFactoryData>::GetUserKey(const char * userKey, void * buf, size_t & len)
+{
+    ReturnErrorCodeIf(!mFactoryData.user.data, CHIP_ERROR_PERSISTED_STORAGE_VALUE_NOT_FOUND);
+    ReturnErrorCodeIf(!buf, CHIP_ERROR_BUFFER_TOO_SMALL);
+
+    bool success = FindUserDataEntry(&mFactoryData, userKey, buf, len, &len);
+
+    ReturnErrorCodeIf(!success, CHIP_ERROR_PERSISTED_STORAGE_VALUE_NOT_FOUND);
+
+    return CHIP_NO_ERROR;
+}
+
 // Fully instantiate the template class in whatever compilation unit includes this file.
 template class FactoryDataProvider<InternalFlashFactoryData>;
+#if defined(USE_PARTITION_MANAGER) && USE_PARTITION_MANAGER == 1 && (defined(CONFIG_CHIP_QSPI_NOR) || defined(CONFIG_CHIP_SPI_NOR))
 template class FactoryDataProvider<ExternalFlashFactoryData>;
+#endif // if defined(USE_PARTITION_MANAGER) && USE_PARTITION_MANAGER == 1 (defined(CONFIG_CHIP_QSPI_NOR) ||
+       // defined(CONFIG_CHIP_SPI_NOR))
 
 } // namespace DeviceLayer
 } // namespace chip
